@@ -19,7 +19,7 @@ import groovy.transform.Field
 @Field static final Map RATE_OPTIONS = (1..10).collectEntries { [(it as String): (it as String)] }
 
 metadata {
-    definition (name: 'RD-250ZG Dimmer', namespace: 'repenic', author: 'Repenic Ltd.') {
+    definition(name: 'RD-250ZG Dimmer', namespace: 'repenic', author: 'Repenic Ltd.') {
         capability 'Actuator'
         capability 'Configuration'
         capability 'Refresh'
@@ -41,7 +41,7 @@ metadata {
         input name: 'minimumBrightness', type: 'number', title: 'Set minimum Brightness (%)', description: 'minimum brightness must be less than maximum brightness.', range: '1..100', defaultValue: 1
         input name: 'maximumBrightness', type: 'number', title: 'Set maximum Brightness (%)', description: 'maximum brightness must be greater than minimum brightness.', range: '1..100', defaultValue: 100
         input name: 'outEdge', type: 'enum', title: 'Dimming mode', options: ['0': 'Leading edge', '1': 'Trailing edge'], defaultValue: '1'
-        input name: 'defaultMoveRate', type: 'enum', title: 'Default Move Rate', options: RATE_OPTIONS, defaultValue: '1'
+        input name: 'defaultMoveRate', type: 'enum', title: 'Default Move Rate', options: RATE_OPTIONS, defaultValue: '3'
         input name: 'childLock', type: 'bool', title: 'Child lock', defaultValue: false
 
         // Co-sleeping mode
@@ -67,9 +67,9 @@ metadata {
     }
 }
 
-
 def installed() {
     log.info 'installed()'
+    seedAppliedBaselines()
     state.onOff = 0
     state.meterMult = 1
     state.meterDiv = 1
@@ -78,10 +78,12 @@ def installed() {
     sendEvent(name: 'switch', value: 'off')
     sendEvent(name: 'level', value: 0)
     sendHubCommand(new hubitat.device.HubMultiAction(syncTimeCmd(), hubitat.device.Protocol.ZIGBEE))
+
 }
 
 def updated() {
     log.info 'updated()'
+    seedAppliedBaselines()
     List cmds = [
         setupStartUpOnOff(),
         setupBoost(),
@@ -97,14 +99,17 @@ def updated() {
         syncTimeCmd(),
     ].findAll { it != null }.flatten()
     if (cmds) {
+        // log.info "updated(): sending ${cmds.size()} zigbee cmd(s)"
         sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
+    } else {
+        // log.info 'updated(): no change, nothing to send'
     }
 }
-
 
 def parse(String description) {
     def descMap = zigbee.parseDescriptionAsMap(description)
     if (descMap?.clusterInt == null) { return }
+    // log.info "parse(): ${descMap}"
     switch (descMap.clusterInt) {
         case 0x0006:
             switch (descMap.attrInt) {
@@ -116,8 +121,8 @@ def parse(String description) {
         case 0x0008:
             switch (descMap.attrInt) {
                 case 0x0000:  handleLevelReport(hexToLong(descMap.value)); break
-                case 0x0002:  handleMinBrightnessReport(hexToLong(descMap.value)); break
-                case 0x0003:  handleMaxBrightnessReport(hexToLong(descMap.value)); break
+                case 0xA000:  handleMinBrightnessReport(hexToLong(descMap.value)); break
+                case 0xA003:  handleMaxBrightnessReport(hexToLong(descMap.value)); break
                 case 0x0011:  handleOnLevelReport(hexToLong(descMap.value)); break
                 case 0x0014:  handleDefaultMoveRateReport(hexToLong(descMap.value)); break
                 case 0xA004:  handleBoostReport(hexToLong(descMap.value)); break
@@ -127,7 +132,7 @@ def parse(String description) {
             break
         case 0x000A:
             if (descMap.attrInt == 0x0000) {
-                log.info 'time attribute received, re-syncing time'
+                // log.info 'time attribute received, re-syncing time'
                 sendHubCommand(new hubitat.device.HubMultiAction(syncTimeCmd(), hubitat.device.Protocol.ZIGBEE))
             }
             break
@@ -154,7 +159,6 @@ def parse(String description) {
     }
 }
 
-
 private handleOnOffReport(Long raw) {
     if (raw == null) { return }
     state.onOff = raw.intValue()
@@ -171,55 +175,68 @@ private handleLevelReport(Long raw) {
     sendEvent(name: 'level', value: level, unit: '%', descriptionText: desc)
 }
 
-
 private handleStartUpOnOffReport(Long raw) {
     if (raw == null) { return }
     Map map = [0: '0', 1: '1', 2: '2', 3: '255', 255: '255']
     String value = map[raw.intValue()]
-    if (value != null) { device.updateSetting('start_up_on_off', [value: value, type: 'enum']) }
+    if (value != null) {
+        alreadyApplied('start_up_on_off', value)
+        device.updateSetting('start_up_on_off', [value: value, type: 'enum'])
+    }
 }
 
 private handleBoostReport(Long raw) {
     if (raw == null) { return }
     Map map = [0: '0', 1: '1']
     String value = map[raw.intValue()]
-    if (value != null) { device.updateSetting('boost', [value: value, type: 'enum']) }
+    if (value != null) {
+        alreadyApplied('boost', value)
+        device.updateSetting('boost', [value: value, type: 'enum'])
+    }
 }
 
 private handleOutEdgeReport(Long raw) {
     if (raw == null) { return }
     Map map = [0: '0', 1: '1']
     String value = map[raw.intValue()]
-    if (value != null) { device.updateSetting('outEdge', [value: value, type: 'enum']) }
+    if (value != null) {
+        alreadyApplied('outEdge', value)
+        device.updateSetting('outEdge', [value: value, type: 'enum'])
+    }
 }
 
 private handleDefaultMoveRateReport(Long raw) {
     if (raw == null) { return }
+    alreadyApplied('defaultMoveRate', raw.toString())
     device.updateSetting('defaultMoveRate', [value: raw.toString(), type: 'enum'])
 }
 
 private handleOnLevelReport(Long raw) {
     if (raw == null) { return }
     Integer value = (raw == 0xFF) ? 0 : Math.min(Math.round(raw / 2.54) as Integer, 100)
+    alreadyApplied('onLevel2', value)
     device.updateSetting('onLevel2', [value: value, type: 'number'])
 }
 
 private handleMinBrightnessReport(Long raw) {
     if (raw == null) { return }
+    // log.info "handleMinBrightnessReport(): ${raw}"
+    alreadyApplied('minimumBrightness', raw.intValue())
     device.updateSetting('minimumBrightness', [value: raw.intValue(), type: 'number'])
 }
 
 private handleMaxBrightnessReport(Long raw) {
     if (raw == null) { return }
+    alreadyApplied('maximumBrightness', raw.intValue())
     device.updateSetting('maximumBrightness', [value: raw.intValue(), type: 'number'])
 }
 
 private handleChildLockReport(Long raw) {
     if (raw == null) { return }
     Boolean locked = raw != 0
+    alreadyApplied('childLock', locked)
     device.updateSetting('childLock', [value: locked, type: 'bool'])
 }
-
 
 private handleWorkModeReport(descMap, String description) {
     if (descMap.attrInt in [0, 1, 2]) {
@@ -229,12 +246,14 @@ private handleWorkModeReport(descMap, String description) {
         }
         switch (descMap.attrInt) {
             case 0: // sleepPattern: [onOff, hour, minute, -, countdown, -]
+                alreadyApplied('sleepPattern', data.subList(4, 10).toString())
                 device.updateSetting('sleepOnOff', [value: data[4] != 0, type: 'bool'])
                 device.updateSetting('sleepHour', [value: String.format('%02d', data[5]), type: 'enum'])
                 device.updateSetting('sleepMinute', [value: String.format('%02d', data[6]), type: 'enum'])
                 device.updateSetting('sleepCountdown', [value: data[8].toString(), type: 'enum'])
                 break
             case 1: // wakeUpPattern: [onOff, hour, minute, brightness, countdown, -]
+                alreadyApplied('wakeupPattern', data.subList(4, 10).toString())
                 device.updateSetting('wakeupOnOff', [value: data[4] != 0, type: 'bool'])
                 device.updateSetting('wakeupHour', [value: String.format('%02d', data[5]), type: 'enum'])
                 device.updateSetting('wakeupMinute', [value: String.format('%02d', data[6]), type: 'enum'])
@@ -242,6 +261,7 @@ private handleWorkModeReport(descMap, String description) {
                 device.updateSetting('wakeupCountdown', [value: data[8].toString(), type: 'enum'])
                 break
             case 2: // nightPattern: [onOff, hour, minute, brightness, endHour, endMinute]
+                alreadyApplied('nightPattern', data.subList(4, 10).toString())
                 device.updateSetting('nightOnOff', [value: data[4] != 0, type: 'bool'])
                 device.updateSetting('nightHour', [value: String.format('%02d', data[5]), type: 'enum'])
                 device.updateSetting('nightMinute', [value: String.format('%02d', data[6]), type: 'enum'])
@@ -252,7 +272,6 @@ private handleWorkModeReport(descMap, String description) {
         }
     }
 }
-
 
 private handleMeteringReport(Integer attrId, Long raw) {
     switch (attrId) {
@@ -305,7 +324,6 @@ private handleElectricalReport(Integer attrId, Long raw) {
     }
 }
 
-
 def on() {
     state.onOff = 1
     String desc = "${device.displayName} is on"
@@ -330,22 +348,24 @@ def setLevel(BigDecimal level, BigDecimal duration = 1) {
     zigbee.setLevel(lvl, Math.round((duration ?: 0) * 10) as Integer)
 }
 
-
 private setupStartUpOnOff() {
     def v = settings.start_up_on_off
     if (v == null) { return null }
+    if (alreadyApplied('start_up_on_off', v)) { return null }
     zigbee.writeAttribute(0x0006, 0x4003, 0x30, v as Integer)
 }
 
 private setupBoost() {
     def v = settings.boost
     if (v == null) { return null }
+    if (alreadyApplied('boost', v)) { return null }
     zigbee.writeAttribute(0x0008, 0xA004, 0x20, v as Integer)
 }
 
 private setupOnLevel() {
     def v = settings.onLevel2
     if (v == null) { return null }
+    if (alreadyApplied('onLevel2', v)) { return null }
     Integer level = v as Integer
     Integer raw = (level <= 0) ? 0xFF : Math.min(Math.round(level * 2.54) as Integer, 0xFE)
     zigbee.writeAttribute(0x0008, 0x0011, 0x20, raw)
@@ -354,6 +374,7 @@ private setupOnLevel() {
 private setupMinBrightness() {
     def v = settings.minimumBrightness
     if (v == null) { return null }
+    if (alreadyApplied('minimumBrightness', v)) { return null }
     Integer raw = Math.min(v as Integer, 99)
     zigbee.writeAttribute(0x0008, 0xA000, 0x20, raw)
 }
@@ -361,6 +382,7 @@ private setupMinBrightness() {
 private setupMaxBrightness() {
     def v = settings.maximumBrightness
     if (v == null) { return null }
+    if (alreadyApplied('maximumBrightness', v)) { return null }
     Integer raw = Math.max(1, Math.min(v as Integer, 100))
     zigbee.writeAttribute(0x0008, 0xA003, 0x20, raw)
 }
@@ -368,19 +390,23 @@ private setupMaxBrightness() {
 private setupOutEdge() {
     def v = settings.outEdge
     if (v == null) { return null }
+    if (alreadyApplied('outEdge', v)) { return null }
     zigbee.writeAttribute(0x0008, 0xB000, 0x30, v as Integer)
 }
 
 private setupDefaultMoveRate() {
     def v = settings.defaultMoveRate
     if (v == null) { return null }
+    if (alreadyApplied('defaultMoveRate', v)) { return null }
     zigbee.writeAttribute(0x0008, 0x0014, 0x20, v as Integer)
 }
 
 private setupChildLock() {
-    if (settings.childLock == null) { return null }
+    def v = settings.childLock
+    if (v == null) { return null }
+    if (alreadyApplied('childLock', v)) { return null }
     // 0x0204 keypadLockout (enum8): 0 = noLockout, 1 = level1Lockout
-    zigbee.writeAttribute(0x0204, 0x0001, 0x30, settings.childLock ? 1 : 0)
+    zigbee.writeAttribute(0x0204, 0x0001, 0x30, v ? 1 : 0)
 }
 
 private setupSleepPattern() {
@@ -393,7 +419,8 @@ private setupSleepPattern() {
         settings.sleepCountdown as Integer,
         0,
     ]
-    log.debug "setupSleepPattern: ${pattern}"
+    if (alreadyApplied('sleepPattern', pattern.toString())) { return null }
+    // log.debug "setupSleepPattern: ${pattern}"
     patternCmd(0x00, pattern)
 }
 
@@ -408,6 +435,7 @@ private setupWakeupPattern() {
         settings.wakeupCountdown as Integer,
         0,
     ]
+    if (alreadyApplied('wakeupPattern', pattern.toString())) { return null }
     patternCmd(0x01, pattern)
 }
 
@@ -423,6 +451,7 @@ private setupNightPattern() {
         settings.nightEndHour as Integer,
         settings.nightEndMinute as Integer,
     ]
+    if (alreadyApplied('nightPattern', pattern.toString())) { return null }
     patternCmd(0x02, pattern)
 }
 
@@ -431,7 +460,6 @@ private patternCmd(Integer cmdId, List<Integer> bytes) {
     "he cmd 0x${device.deviceNetworkId} 0x${device.endpointId} 0xE003 ${String.format('%02x', cmdId)} {${payload}} {}"
 }
 
-
 private syncTimeCmd() {
     TimeZone tz = location.timeZone ?: TimeZone.getDefault()
     Date now = new Date()
@@ -439,13 +467,12 @@ private syncTimeCmd() {
     Long epoch = (now.time / 1000 as Long) + offsetSeconds
     String timePayload = (0..<4).collect { i -> String.format('%02x', (epoch >> (8 * i)) & 0xFF) }.join()
     String offsetPayload = (3..0).collect { i -> String.format('%02x', (offsetSeconds >> (8 * i)) & 0xFF) }.join()
-    log.debug "syncTimeCmd: ${epoch},${timePayload}  ${offsetSeconds},${offsetPayload}"
+    // log.debug "syncTimeCmd: ${epoch},${timePayload}  ${offsetSeconds},${offsetPayload}"
     [
         "he wattr 0x${device.deviceNetworkId} 0x${device.endpointId} 0x000A 0x0000 0xE2 {${timePayload}} {}",
         "he wattr 0x${device.deviceNetworkId} 0x${device.endpointId} 0x000A 0x0002 0x23 {${offsetPayload}} {}",
     ]
 }
-
 
 def configure() {
     log.info 'configure()'
@@ -465,7 +492,6 @@ def configure() {
         zigbee.configureReporting(0x0204, 0x0001, 0x30, 0, 300, null, [:], 0),          // keypadLockout
     ]
     cmds += syncTimeCmd()
-    // 读取计量换算系数与当前状态
     cmds += readAllAttributes()
     return delayBetween(cmds.flatten() as List, 250)
 }
@@ -482,7 +508,7 @@ private readAllAttributes() {
         zigbee.readAttribute(0x0702, [0x0301, 0x0302]),                       // multiplier(769) / divisor(770), uint24
         zigbee.readAttribute(0x0B04, [0x0604, 0x0605]),                       // acPowerMultiplier / acPowerDivisor
         zigbee.readAttribute(0x0006, [0x0000, 0x4003]),
-        zigbee.readAttribute(0x0008, [0x0000, 0x0002, 0x0003, 0x0011, 0x0014, 0xA004, 0xB000]),
+        zigbee.readAttribute(0x0008, [0x0000, 0xA000, 0xA003, 0x0011, 0x0014, 0xA004, 0xB000]),
         zigbee.readAttribute(0x0702, [0x0000]),
         zigbee.readAttribute(0x0B04, [0x0505, 0x0508, 0x050B]),
         zigbee.readAttribute(0x0204, [0x0001]),
@@ -502,6 +528,38 @@ private List allAttrs(Map descMap) {
 private hexToLong(String hex) {
     if (hex == null) { return null }
     Long.parseLong(hex, 16)
+}
+
+
+private void seedAppliedBaselines() {
+    if (state.appliedSeeded) { return }
+    Map applied = [
+        'start_up_on_off':  '0',
+        'boost':            '1',
+        'onLevel2':         '0',
+        'minimumBrightness':'1',
+        'maximumBrightness':'100',
+        'outEdge':          '1',
+        'defaultMoveRate':  '3',
+        'childLock':        'false',
+        'sleepPattern':     [0, 10, 0, 0, 30, 0].toString(),
+        'wakeupPattern':    [0, 10, 0, 0xFE, 30, 0].toString(),
+        'nightPattern':     [0, 0, 0, 25, 6, 0].toString(),
+    ]
+    state.applied = applied
+    state.appliedSeeded = true
+    // log.info "seedAppliedBaselines: initialized ${applied.size()} defaults"
+}
+
+private boolean alreadyApplied(String name, def value) {
+    Map applied = state.applied ?: [:]
+    String key = value?.toString()
+    String recorded = applied[name]
+    boolean same = (recorded == key)
+    applied[name] = key
+    state.applied = applied
+    // log.info "alreadyApplied: ${name} current=${key} recorded=${recorded} => ${same ? 'SKIP(unchanged)' : 'SEND(changed)'}"
+    return same
 }
 
 private double roundTo(double v, int digits = 2) {
